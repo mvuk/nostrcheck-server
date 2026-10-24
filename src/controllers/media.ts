@@ -21,8 +21,8 @@ import { deleteFile, getFilePath } from "../lib/storage/core.js";
 import { saveTmpFile } from "../lib/storage/local.js";
 import { getRemoteFile } from "../lib/storage/remote.js";
 import { Transaction } from "../interfaces/payments.js";
-import { checkTransaction, updateAccountId } from "../lib/payments/core.js";
-import { checkLightningProof } from "../lib/blossom/BUD07.js";
+import { checkTransaction, getArkPaymentRequest, getTransactionByArkAddress, updateAccountId } from "../lib/payments/core.js";
+import { checkArkProof, checkLightningProof } from "../lib/blossom/BUD07.js";
 import { BlobDescriptor, BUDKinds } from "../interfaces/blossom.js";
 import { prepareBlobDescriptor } from "../lib/blossom/BUD02.js";
 import { loadCdnPage } from "./frontend.js";
@@ -464,6 +464,16 @@ const uploadMedia = async (req: Request, res: Response, version: string, mode: U
 
 		// If not exist, find an existing transaction with the same paymenthash and get the transaction_id
 		if (filedata.transaction_id == "" && preimage != undefined) filedata.transaction_id  = (await dbMultiSelect(["id"], "transactions", "paymenthash = ?", [await hashString(preimage, "preimage")], true))[0]?.id || "";
+
+		// Same for an Ark address (X-Ark proof) quoted on HEAD /upload, before the file existed.
+		// Only a transaction that isn't bound to another file yet can be taken over.
+		const arkHeader = req.headers["x-ark"]?.toString().trim();
+		if (filedata.transaction_id == "" && arkHeader) {
+			const arkTransaction = await getTransactionByArkAddress(req.hostname, arkHeader);
+			if (arkTransaction.transactionid != 0 && (await dbMultiSelect(["id"], "mediafiles", "transactionid = ?", [arkTransaction.transactionid], true)).length == 0) {
+				filedata.transaction_id = arkTransaction.transactionid.toString();
+			}
+		}
 		
 		// If we have a transaction_id, we update the mediafiles table with the transaction_id and update the transaction table with the mediafiles id
 		if (filedata.transaction_id != "") {
@@ -486,12 +496,17 @@ const uploadMedia = async (req: Request, res: Response, version: string, mode: U
 		// If we have a preimage, compare the paymenthash with the transaction paymenthash and update the invoice status.
 		// BUD-07: a proof that can't be accepted gets a 400 with X-Reason, not another 402.
 		if (transaction.isPaid == false) {
-			const lightningProof = await checkLightningProof(req.hostname, lightningHeader, transaction.transactionid.toString());
-			if (lightningProof.status == "valid") transaction.isPaid = true;
-			if (lightningProof.status == "invalid") {
-				logger.info(`uploadMedia - 400 Bad request - ${lightningProof.reason}`, "|", reqInfo.ip);
-				res.setHeader("X-Reason", lightningProof.reason);
-				return res.status(400).send({"status": "error", "message": lightningProof.reason});
+			for (const checkProof of [
+				() => checkLightningProof(req.hostname, lightningHeader, transaction.transactionid.toString()),
+				() => checkArkProof(req.hostname, arkHeader, transaction.transactionid.toString()),
+			]) {
+				const proof = await checkProof();
+				if (proof.status == "valid") { transaction.isPaid = true; break; }
+				if (proof.status == "invalid") {
+					logger.info(`uploadMedia - 400 Bad request - ${proof.reason}`, "|", reqInfo.ip);
+					res.setHeader("X-Reason", proof.reason);
+					return res.status(400).send({"status": "error", "message": proof.reason});
+				}
 			}
 		}
 
@@ -501,6 +516,8 @@ const uploadMedia = async (req: Request, res: Response, version: string, mode: U
 			res.status(402);
 			res.setHeader("X-Lightning", transaction.paymentRequest);
 			res.setHeader("X-Lightning-amount", transaction.satoshi);
+			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
+			if (arkRequest != "") res.setHeader("X-Ark", arkRequest);
 			res.setHeader("X-Reason", `Invoice (${transaction.satoshi}) for hash: ${filedata.originalhash}`);
 		}
 
@@ -642,6 +659,8 @@ const headMedia = async (req: Request, res: Response): Promise<Response> => {
 		if (transaction.transactionid != 0 && transaction.isPaid == false && getConfig(req.hostname, ["payments", "satoshi", "mediaMaxSatoshi"]) > 0) {
 			res.setHeader("X-Lightning", transaction.paymentRequest);
 			res.setHeader("X-Lightning-Amount", transaction.satoshi);
+			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
+			if (arkRequest != "") res.setHeader("X-Ark", arkRequest);
 			res.setHeader("X-Reason", `Invoice (${transaction.satoshi}) for hash: ${hash}`);
 			return res.status(402).send()
 		}
@@ -1068,6 +1087,8 @@ const getMediaStatusbyID = async (req: Request, res: Response, version:string): 
 			response = 402;
 			res.setHeader("X-Lightning", transaction.paymentRequest);
 			res.setHeader("X-Lightning-amount", transaction.satoshi);
+			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
+			if (arkRequest != "") res.setHeader("X-Ark", arkRequest);
 			res.setHeader("X-Reason", `Invoice (${transaction.satoshi}) for hash: ${filedata.originalhash}`);
 		}
 	}
@@ -1295,13 +1316,18 @@ const getMediabyURL = async (req: Request, res: Response) => {
 		
 		// BUD-07: a preimage in X-Lightning unlocks the file; a proof that can't be accepted gets a 400 with X-Reason.
 		if (isModuleEnabled("payments", req.hostname) && transaction.isPaid == false && adminRequest == false) {
-			const lightningProof = await checkLightningProof(req.hostname, req.headers["x-lightning"]?.toString(), transaction.transactionid.toString());
-			if (lightningProof.status == "valid") transaction.isPaid = true;
-			if (lightningProof.status == "invalid") {
-				logger.debug(`getMediabyURL - 400 Bad request - ${lightningProof.reason} ${req.url}`, "|", reqInfo.ip);
-				res.setHeader("Content-Type", "text/plain");
-				res.setHeader("X-Reason", lightningProof.reason);
-				return res.status(400).send(lightningProof.reason);
+			for (const checkProof of [
+				() => checkLightningProof(req.hostname, req.headers["x-lightning"]?.toString(), transaction.transactionid.toString()),
+				() => checkArkProof(req.hostname, req.headers["x-ark"]?.toString(), transaction.transactionid.toString()),
+			]) {
+				const proof = await checkProof();
+				if (proof.status == "valid") { transaction.isPaid = true; break; }
+				if (proof.status == "invalid") {
+					logger.debug(`getMediabyURL - 400 Bad request - ${proof.reason} ${req.url}`, "|", reqInfo.ip);
+					res.setHeader("Content-Type", "text/plain");
+					res.setHeader("X-Reason", proof.reason);
+					return res.status(400).send(proof.reason);
+				}
 			}
 		}
 
@@ -1318,6 +1344,8 @@ const getMediabyURL = async (req: Request, res: Response) => {
 
 			res.setHeader('X-Lightning', transaction.paymentRequest);
 			res.setHeader('X-Lightning-Amount', transaction.satoshi);
+			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
+			if (arkRequest != "") res.setHeader('X-Ark', arkRequest);
 			res.setHeader('X-Original-Content-Type', fileType);
 			res.setHeader("X-Reason", `Invoice (${transaction.satoshi}) for hash: ${filedata[0].original_hash}`);
 			return serveBuffer(req, res, qrCode.buffer, qrCode.type, true, 402);
@@ -1909,6 +1937,8 @@ const headUpload = async (req: Request, res: Response): Promise<Response> => {
 	if (transaction.transactionid != 0 && transaction.isPaid == false && getConfig(req.hostname, ["payments", "satoshi", "mediaMaxSatoshi"]) > 0) {
 		res.setHeader("X-Lightning", transaction.paymentRequest);
 		res.setHeader("X-Lightning-Amount", transaction.satoshi);
+		const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
+		if (arkRequest != "") res.setHeader("X-Ark", arkRequest);
 		res.setHeader("X-Reason", `Invoice (${transaction.satoshi}) for hash: ${hash}`);
 		return res.status(402).send();
 	}
