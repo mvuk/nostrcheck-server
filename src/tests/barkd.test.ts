@@ -58,14 +58,13 @@ vi.mock("../lib/database/core.js", () => ({
 	dbDelete: async () => true,
 }));
 
-import { generateBarkdInvoice, getBarkdArkReceived, getBarkdArkServerPubkey, isInvoicePaidBarkd, newBarkdArkAddress } from "../lib/payments/barkd.js";
+import { generateBarkdInvoice, getBarkdArkReceived, isInvoicePaidBarkd, newBarkdArkAddress } from "../lib/payments/barkd.js";
 import { getArkPaymentRequest, getTransaction } from "../lib/payments/core.js";
 import { checkArkProof } from "../lib/blossom/BUD07.js";
 
 // --- mocked barkd ------------------------------------------------------------------------------
 
 const TOKEN = "test-token";
-const SERVER_PUBKEY = "02037188bdd7579a0cd0b22a51110986df1ea08e30192658fe0e219590e4a723d3";
 const barkd = {
 	addresses: 0,
 	receives: new Map<string, { state: string, payment_preimage: string | null, settled_at: string | null }>(),
@@ -109,7 +108,6 @@ beforeAll(async () => {
 				return r ? send(200, { payment_hash: receive[1], amount_sat: 21, invoice: "", htlc_vtxo_ids: [], ...r }) : send(404, { message: "not found" });
 			}
 			if (req.method == "POST" && path == "/api/v1/wallet/addresses/next") return send(200, { address: `tark1testaddress${++barkd.addresses}` });
-			if (req.method == "GET" && path == "/api/v1/wallet/ark-info") return send(200, { network: "signet", server_pubkey: SERVER_PUBKEY });
 			if (req.method == "POST" && path == "/api/v1/wallet/sync/mailbox") return send(200, { checkpoint: 1 });
 			if (req.method == "GET" && path == "/api/v1/history") {
 				if (url.searchParams.get("type") != "ark") return send(400, { message: "bad request" });
@@ -139,7 +137,7 @@ beforeEach(() => {
 
 const addTransaction = (satoshi: number) : Row => {
 	const row: Row = {
-		id: db.nextId++, type: "invoice", accountid: "1100000000", paymentrequest: "lnbc...", paymenthash: "cd".repeat(32),
+		id: db.nextId++, type: "invoice", accountid: "1100000000", paymentrequest: "lntbs1testinvoice", paymenthash: "cd".repeat(32),
 		arkaddress: null, satoshi, paid: 0, preimage: "", createddate: "2026-10-23 10:00:00",
 		expirydate: "2999-01-01 00:00:00", paiddate: null, comments: "Invoice for: mediafiles:1",
 	};
@@ -169,11 +167,10 @@ describe("barkd provider (bark-rest 0.8.0)", () => {
 		expect(await isInvoicePaidBarkd(hash)).toEqual({ paiddate: String(Date.parse("2026-10-23T10:00:00Z") / 1000), preimage: "12".repeat(32) });
 	});
 
-	test("Ark address, server key and settled receipts", async () => {
+	test("Ark address and settled receipts", async () => {
 		const address = await newBarkdArkAddress();
 		expect(address).toMatch(/^tark1testaddress\d+$/);
 		expect(await newBarkdArkAddress()).not.toBe(address);
-		expect(await getBarkdArkServerPubkey()).toBe(SERVER_PUBKEY);
 
 		arkPayment(address, 2);
 		arkPayment(address, 5, "pending");
@@ -199,18 +196,27 @@ describe("barkd provider (bark-rest 0.8.0)", () => {
 
 describe("X-Ark (Blossom BUD-07, hzrd149/blossom#116)", () => {
 
-	test("402 carries a BIP-321 URI with a fresh address per unpaid file", async () => {
+	test("402 carries a BIP-321 URI (ark + lightning + amount) with a fresh address per unpaid file", async () => {
 		const a = addTransaction(3);
 		const b = addTransaction(1500);
 		const ta = await getTransaction("example.com", String(a.id));
 		const uriA = await getArkPaymentRequest("example.com", ta);
-		expect(uriA).toMatch(new RegExp(`^bitcoin:\\?ark=tark1testaddress\\d+&amount=0\\.00000003&ark-server=${SERVER_PUBKEY}$`));
+		expect(uriA).toMatch(/^bitcoin:\?ark=tark1testaddress\d+&lightning=lntbs1testinvoice&amount=0\.00000003$/);
+		// Only standard BIP-321 parameters: the address already encodes its Ark server
+		expect(uriA).not.toContain("ark-server");
 
 		// Same file, same address; another file, another address
 		expect(await getArkPaymentRequest("example.com", await getTransaction("example.com", String(a.id)))).toBe(uriA);
 		const uriB = await getArkPaymentRequest("example.com", await getTransaction("example.com", String(b.id)));
-		expect(uriB).toContain("&amount=0.000015&");
+		expect(new URL(uriB).searchParams.get("amount")).toBe("0.000015");
 		expect(new URL(uriB).searchParams.get("ark")).not.toBe(new URL(uriA).searchParams.get("ark"));
+	});
+
+	test("No lightning instruction when the transaction has no invoice", async () => {
+		const a = addTransaction(3);
+		a.paymentrequest = "";
+		const uri = await getArkPaymentRequest("example.com", await getTransaction("example.com", String(a.id)));
+		expect(uri).toMatch(/^bitcoin:\?ark=tark1testaddress\d+&amount=0\.00000003$/);
 	});
 
 	test("Concurrent 402s for one file get one address", async () => {

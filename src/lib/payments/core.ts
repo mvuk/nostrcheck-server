@@ -5,7 +5,7 @@ import { sendMessage } from "../nostr/NIP04.js";
 import { getNewDate } from "../utils.js";
 import { generateNwcInvoice, isInvoicePaidNwc } from "../nostr/NIP47.js";
 import { generateLNBitsInvoice, isInvoicePaidLNbits } from "./lnbits.js";
-import { generateBarkdInvoice, getBarkdArkReceived, getBarkdArkServerPubkey, isInvoicePaidBarkd, newBarkdArkAddress, syncBarkdMailbox } from "./barkd.js";
+import { generateBarkdInvoice, getBarkdArkReceived, isInvoicePaidBarkd, newBarkdArkAddress, syncBarkdMailbox } from "./barkd.js";
 import { getConfig, getTenants, isModuleEnabled } from "../config/core.js";
 
 const getLNurl = () : string => `https://${getConfig(null, ["payments", "LNAddress"]).split("@")[1]}/.well-known/lnurlp/${getConfig(null, ["payments", "LNAddress"]).split("@")[0]}`;
@@ -27,7 +27,6 @@ const paymentProviders: Record<string, PaymentProvider> = {
         ark: {
             enabled: () => getConfig(null, ["payments", "paymentProviders", "barkd", "ark"]) !== false,
             newAddress: newBarkdArkAddress,
-            serverPubkey: getBarkdArkServerPubkey,
             received: getBarkdArkReceived,
             sync: syncBarkdMailbox,
         },
@@ -599,8 +598,9 @@ const _ensureArkAddress = async (transactionid: number, ark: ArkPaymentProvider)
 }
 
 /**
- * Returns the X-Ark payment request (a BIP-321 URI) for an unpaid transaction,
- * creating its Ark address the first time. Returns "" if Ark payments are off.
+ * Returns the X-Ark payment request for an unpaid transaction, creating its Ark address the first time:
+ * a BIP-321 URI with the address, the transaction's Lightning invoice (when it has one) and the amount.
+ * Returns "" if Ark payments are off.
  */
 const getArkPaymentRequest = async (tenant: string, transaction: Transaction) : Promise<string> => {
 
@@ -615,10 +615,13 @@ const getArkPaymentRequest = async (tenant: string, transaction: Transaction) : 
     transaction.arkAddress = stored.arkaddress || await _ensureArkAddress(transaction.transactionid, ark);
     if (!transaction.arkAddress) return "";
 
-    const serverPubkey = await ark.serverPubkey();
-    if (serverPubkey == "") return "";
+    // The X-Lightning invoice goes in the same URI, so a client can hand the whole value to its
+    // wallet (NWC-321 pay): the wallet pays ark if the address is on its own Ark server, else lightning.
+    // The address encodes its Ark server, so no server key is needed.
+    const lightning = transaction.paymentRequest && Number(transaction.satoshi) == Number(stored.satoshi)
+        ? `&lightning=${transaction.paymentRequest}` : "";
 
-    return `bitcoin:?ark=${transaction.arkAddress}&amount=${formatBtcAmount(Number(stored.satoshi))}&ark-server=${serverPubkey}`;
+    return `bitcoin:?ark=${transaction.arkAddress}${lightning}&amount=${formatBtcAmount(Number(stored.satoshi))}`;
 }
 
 const _getTransactionByArkAddress = async (address: string) : Promise<Transaction> => {

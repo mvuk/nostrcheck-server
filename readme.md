@@ -178,8 +178,10 @@ It doesn't use `payments.LNAddress`.
 - `url`: barkd's address. barkd listens on port 3000 by default, the same as this server, so start it on another port.
 - `authToken`: sent as `Authorization: Bearer <token>`.
 - `ark`: also accept native Ark payments ([`X-Ark`](https://github.com/hzrd149/blossom/pull/116), draft). Each unpaid
-  file gets its own Ark address, and the 402 carries `X-Ark: bitcoin:?ark=<address>&amount=<btc>&ark-server=<pubkey>`.
-  A wallet on the same Ark server pays the address and retries with the address in the `X-Ark` request header.
+  file gets its own Ark address, and the 402 carries `X-Ark: bitcoin:?ark=<address>&lightning=<invoice>&amount=<btc>`,
+  a BIP-321 URI with the same invoice as `X-Lightning`. A client can pass it unchanged to its wallet (NWC-321 `pay`):
+  a wallet on the same Ark server pays the address and the client retries with the address in the `X-Ark` request
+  header; any other wallet pays the invoice and the client retries with the preimage in `X-Lightning`.
   The payments to the address that are settled in the wallet must add up to the price; the address is then redeemed
   once and unlocks the file. Payments are also picked up every `invoicePaidInterval` seconds, like invoices.
 

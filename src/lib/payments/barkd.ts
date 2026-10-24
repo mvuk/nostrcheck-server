@@ -105,22 +105,6 @@ const newBarkdArkAddress = async () : Promise<string> => {
     }
 }
 
-// The Ark server key doesn't change for a wallet, so it's fetched once per barkd url.
-let arkServerPubkey = { url: "", pubkey: "" };
-const getBarkdArkServerPubkey = async () : Promise<string> => {
-    const url = getConfig(null, ["payments", "paymentProviders", "barkd", "url"]) || "";
-    if (arkServerPubkey.url == url && arkServerPubkey.pubkey != "") return arkServerPubkey.pubkey;
-    try {
-        const data = await barkdRequest("GET", "/wallet/ark-info") as { server_pubkey?: string };
-        if (!data?.server_pubkey) return "";
-        arkServerPubkey = { url, pubkey: data.server_pubkey.toLowerCase() };
-        return arkServerPubkey.pubkey;
-    } catch (e) {
-        logger.error(`getBarkdArkServerPubkey - Error getting Ark info from barkd with error ${e}`);
-        return "";
-    }
-}
-
 // Pull pending arkoor receives from the Ark server mailbox, so the history is current.
 const syncBarkdMailbox = async () : Promise<void> => {
     try {
@@ -160,4 +144,4 @@ const getBarkdArkReceived = async (address: string, sync = true) : Promise<numbe
     }
 }
 
-export { generateBarkdInvoice, isInvoicePaidBarkd, newBarkdArkAddress, getBarkdArkServerPubkey, getBarkdArkReceived, syncBarkdMailbox };
+export { generateBarkdInvoice, isInvoicePaidBarkd, newBarkdArkAddress, getBarkdArkReceived, syncBarkdMailbox };

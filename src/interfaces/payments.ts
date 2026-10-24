@@ -111,8 +111,6 @@ interface ArkPaymentProvider {
     enabled: () => boolean;
     // A fresh, never used Ark address of the server's wallet ("" on error).
     newAddress: () => Promise<string>;
-    // The wallet's Ark server public key, 33-byte compressed, lowercase hex ("" on error).
-    serverPubkey: () => Promise<string>;
     // Satoshis received on the address and settled in the wallet, -1 on error.
     received: (address: string, sync?: boolean) => Promise<number>;
     // Bring the wallet up to date with the Ark server before checking many addresses.
