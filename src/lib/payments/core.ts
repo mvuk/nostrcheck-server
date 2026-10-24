@@ -1,10 +1,11 @@
-import { accounts, emptyInvoice, emptyTransaction, Invoice, PaymentProvider, tableCalculateMode, Transaction } from "../../interfaces/payments.js";
+import { accounts, ArkPaymentProvider, emptyInvoice, emptyTransaction, Invoice, PaymentProvider, tableCalculateMode, Transaction } from "../../interfaces/payments.js";
 import { dbDelete, dbInsert, dbMultiSelect, dbSelect, dbUpdate } from "../database/core.js"
 import { logger } from "../logger.js";
 import { sendMessage } from "../nostr/NIP04.js";
 import { getNewDate } from "../utils.js";
 import { generateNwcInvoice, isInvoicePaidNwc } from "../nostr/NIP47.js";
 import { generateLNBitsInvoice, isInvoicePaidLNbits } from "./lnbits.js";
+import { generateBarkdInvoice, getBarkdArkReceived, getBarkdArkServerPubkey, isInvoicePaidBarkd, newBarkdArkAddress, syncBarkdMailbox } from "./barkd.js";
 import { getConfig, getTenants, isModuleEnabled } from "../config/core.js";
 
 const getLNurl = () : string => `https://${getConfig(null, ["payments", "LNAddress"]).split("@")[1]}/.well-known/lnurlp/${getConfig(null, ["payments", "LNAddress"]).split("@")[0]}`;
@@ -19,10 +20,28 @@ const paymentProviders: Record<string, PaymentProvider> = {
         generateInvoice: (satoshi) => generateNwcInvoice(getLNurl(), satoshi),
         isInvoicePaid: isInvoicePaidNwc,
     },
+    barkd: {
+        generateInvoice: (satoshi) => generateBarkdInvoice(satoshi, ""),
+        isInvoicePaid: isInvoicePaidBarkd,
+        requiresLNAddress: false,
+        ark: {
+            enabled: () => getConfig(null, ["payments", "paymentProviders", "barkd", "ark"]) !== false,
+            newAddress: newBarkdArkAddress,
+            serverPubkey: getBarkdArkServerPubkey,
+            received: getBarkdArkReceived,
+            sync: syncBarkdMailbox,
+        },
+    },
 };
 
 // Any other value falls back to NWC, as before.
 const getPaymentProvider = () : PaymentProvider => paymentProviders[getConfig(null, ["payments", "paymentProvider"])] || paymentProviders.nwc;
+
+// The Ark rail of the current provider, if it has one and it's turned on.
+const getArkProvider = () : ArkPaymentProvider | null => {
+    const ark = getPaymentProvider().ark;
+    return ark && ark.enabled() ? ark : null;
+};
 
 const checkTransaction = async (tenant: string, transactionid : string, originId: string, originTable : string, size: number, minSize: number, maxSize: number, maxSatoshi: number,  pubkey : string): Promise<Transaction> => {
 
@@ -92,7 +111,7 @@ const checkTransaction = async (tenant: string, transactionid : string, originId
 
 const generateInvoice = async (accountid: number, satoshi: number, originTable : string, originId : string, overwrite = false, transactionId = 0) : Promise<Invoice> => {
 
-    if (getConfig(null, ["payments", "LNAddress"]) == "") {
+    if (getPaymentProvider().requiresLNAddress !== false && getConfig(null, ["payments", "LNAddress"]) == "") {
         logger.error(`generateInvoice - LNAddress not set in config file. Cannot generate invoice.`);
         return emptyInvoice;
     }
@@ -271,18 +290,19 @@ const addBalance = async (tenant: string, accountid: number, amount: number) : P
 
 const getPendingInvoices = async () : Promise<Invoice[]> => {
 
-    const result = await dbMultiSelect(["id", "accountid", "paymentrequest", "paymenthash",  "satoshi", "preimage", "createddate", "expirydate", "paiddate", "comments"],
+    const result = await dbMultiSelect(["id", "accountid", "paymentrequest", "paymenthash", "arkaddress", "satoshi", "preimage", "createddate", "expirydate", "paiddate", "comments"],
                                                             "transactions",
                                                             "paid = ?", 
                                                             [0], false);
     const invoices : Invoice[] = [];
     result.forEach(async invoice => {
-        const {id, accountid, paymentrequest, paymenthash, satoshi, preimage, createddate, expirydate, paiddate, comments} = invoice
+        const {id, accountid, paymentrequest, paymenthash, arkaddress, satoshi, preimage, createddate, expirydate, paiddate, comments} = invoice
         invoices.push({
             transactionid: Number(id),
             accountid: Number(accountid),
             paymentRequest: paymentrequest,
             paymentHash: paymenthash,
+            arkAddress: arkaddress || "",
             satoshi: Number(satoshi),
             isPaid: false,
             preimage: preimage,
@@ -335,19 +355,20 @@ const _getTransaction = async (transactionid: string) : Promise<Transaction> => 
 
     if (!transactionid || transactionid == "0")   return emptyTransaction;
 
-    const result = await dbMultiSelect(["id", "type", "accountid", "paymentrequest", "paymenthash", "satoshi", "paid", "preimage", "createddate", "expirydate", "paiddate", "comments"],
+    const result = await dbMultiSelect(["id", "type", "accountid", "paymentrequest", "paymenthash", "arkaddress", "satoshi", "paid", "preimage", "createddate", "expirydate", "paiddate", "comments"],
                                                             "transactions",
                                                             "id = ?",
                                                             [transactionid], true);
 
     if (result.length == 0) {return emptyTransaction}
-    const {id, type, accountid, paymentrequest, paymenthash, satoshi, paid, preimage, createddate, expirydate, paiddate, comments} = result[0];
+    const {id, type, accountid, paymentrequest, paymenthash, arkaddress, satoshi, paid, preimage, createddate, expirydate, paiddate, comments} = result[0];
     const transaction: Transaction = {
         transactionid: Number(id),
         type: type,
         accountid: Number(accountid),
         paymentRequest: paymentrequest,
         paymentHash: paymenthash,
+        arkAddress: arkaddress || "",
         satoshi: Number(satoshi),
         isPaid: Boolean(paid),
         preimage: preimage,
@@ -551,6 +572,113 @@ const isInvoicePaid = async (tenant: string, paymentHash: string) : Promise<{pai
     return _isInvoicePaid(paymentHash);
 }
 
+// Ark (Blossom X-Ark, https://github.com/hzrd149/blossom/pull/116).
+// Each unpaid transaction gets its own Ark address. It never expires: the file stays unpaid until
+// its address (or its Lightning invoice) is paid in full, and the address is redeemed only once.
+
+const formatBtcAmount = (satoshi: number) : string => (satoshi / 100000000).toFixed(8).replace(/\.?0+$/, "");
+
+// One Ark address per transaction, even when several requests for the same file arrive at once.
+const arkAddressCreating = new Map<number, Promise<string>>();
+const _ensureArkAddress = async (transactionid: number, ark: ArkPaymentProvider) : Promise<string> => {
+
+    let pending = arkAddressCreating.get(transactionid);
+    if (!pending) {
+        pending = (async () => {
+            const existing = await dbSelect("SELECT arkaddress FROM transactions WHERE id = ?", "arkaddress", [transactionid.toString()]);
+            if (existing) return existing.toString();
+            const address = await ark.newAddress();
+            if (address == "") return "";
+            if (!await dbUpdate("transactions", {"arkaddress" : address}, ["id"], [transactionid])) return "";
+            logger.debug(`ensureArkAddress - New Ark address for transaction: ${transactionid}`);
+            return address;
+        })().finally(() => arkAddressCreating.delete(transactionid));
+        arkAddressCreating.set(transactionid, pending);
+    }
+    return await pending;
+}
+
+/**
+ * Returns the X-Ark payment request (a BIP-321 URI) for an unpaid transaction,
+ * creating its Ark address the first time. Returns "" if Ark payments are off.
+ */
+const getArkPaymentRequest = async (tenant: string, transaction: Transaction) : Promise<string> => {
+
+    if (!isModuleEnabled("payments", tenant)) return "";
+    const ark = getArkProvider();
+    if (!ark || transaction.isPaid || !transaction.transactionid || transaction.satoshi <= 0) return "";
+
+    // Quote the stored amount: it's the one the payment is checked against.
+    const stored = (await dbMultiSelect(["arkaddress", "satoshi"], "transactions", "id = ?", [transaction.transactionid], true))[0];
+    if (!stored || Number(stored.satoshi) <= 0) return "";
+
+    transaction.arkAddress = stored.arkaddress || await _ensureArkAddress(transaction.transactionid, ark);
+    if (!transaction.arkAddress) return "";
+
+    const serverPubkey = await ark.serverPubkey();
+    if (serverPubkey == "") return "";
+
+    return `bitcoin:?ark=${transaction.arkAddress}&amount=${formatBtcAmount(Number(stored.satoshi))}&ark-server=${serverPubkey}`;
+}
+
+const _getTransactionByArkAddress = async (address: string) : Promise<Transaction> => {
+    if (!address) return emptyTransaction;
+    const id = await dbSelect("SELECT id FROM transactions WHERE arkaddress = ?", "id", [address]);
+    if (!id) return emptyTransaction;
+    return await _getTransaction(id.toString());
+}
+
+const getTransactionByArkAddress = async (tenant: string, address: string) : Promise<Transaction> => {
+    if (!isModuleEnabled("payments", tenant)) return emptyTransaction;
+    return await _getTransactionByArkAddress(address);
+}
+
+// Collects an Ark payment at most once, even if a request and the poller find it at the same time.
+const arkCollecting = new Set<number>();
+const _collectArkPayment = async (invoice: Invoice | Transaction) : Promise<boolean> => {
+
+    if (arkCollecting.has(invoice.transactionid)) return false;
+    arkCollecting.add(invoice.transactionid);
+    try {
+        const current = await _getTransaction(invoice.transactionid.toString());
+        if (current.transactionid == 0) return false;
+        if (current.isPaid) return true;
+        return await _collectInvoice({
+            paymentRequest: current.paymentRequest,
+            paymentHash: current.paymentHash,
+            arkAddress: current.arkAddress,
+            satoshi: current.satoshi,
+            isPaid: false,
+            preimage: "",
+            createdDate: current.createdDate,
+            expiryDate: current.expiryDate,
+            paidDate: Math.floor(Date.now() / 1000).toString(),
+            description: current.comments,
+            transactionid: current.transactionid,
+            accountid: current.accountid,
+        }, false, true);
+    } finally {
+        arkCollecting.delete(invoice.transactionid);
+    }
+}
+
+/**
+ * Checks the settled Ark payments to a transaction's address and, if they cover
+ * the amount, marks the transaction as paid.
+ * @returns the satoshis received (-1 if the wallet could not be asked) and whether it is now paid.
+ */
+const redeemArkPayment = async (tenant: string, transaction: Transaction) : Promise<{received: number, paid: boolean}> => {
+
+    const ark = getArkProvider();
+    if (!isModuleEnabled("payments", tenant) || !ark || !transaction.arkAddress) return {received: 0, paid: false};
+
+    const received = await ark.received(transaction.arkAddress, true);
+    if (received < transaction.satoshi || transaction.satoshi <= 0) return {received, paid: false};
+
+    const paid = await _collectArkPayment(transaction);
+    return {received, paid};
+}
+
 // Check periodically for pending invoices and update the balance
 let isProcessing = false;
 const processPendingInvoices = async () => {
@@ -567,6 +695,8 @@ const processPendingInvoices = async () => {
         isProcessing = true;
         const pendingInvoices = await getPendingInvoices();
         logger.debug(`processPendingInvoices - Processing pending invoices: ${pendingInvoices.length}`);
+        const ark = getArkProvider();
+        if (ark && pendingInvoices.some(invoice => invoice.arkAddress)) await ark.sync();
         for (const invoice of pendingInvoices) {
             await new Promise(resolve => setTimeout(resolve, 300));
             const paidInfo = await _isInvoicePaid(invoice.paymentHash);
@@ -574,6 +704,12 @@ const processPendingInvoices = async () => {
                 invoice.paidDate = paidInfo.paiddate;
                 invoice.preimage = paidInfo.preimage;
                 await _collectInvoice(invoice, false, true);
+                continue;
+            }
+            // Ark: paid when the settled payments to the file's Ark address cover the amount.
+            if (ark && invoice.arkAddress) {
+                const received = await ark.received(invoice.arkAddress, false);
+                if (received >= invoice.satoshi && invoice.satoshi > 0) await _collectArkPayment(invoice);
             }
         }
         isProcessing = false;
@@ -644,5 +780,8 @@ export {    checkTransaction,
             getTransaction,
             isInvoicePaid,
             calculateSatoshi,
-            updateAccountId
+            updateAccountId,
+            getArkPaymentRequest,
+            getTransactionByArkAddress,
+            redeemArkPayment
         }
