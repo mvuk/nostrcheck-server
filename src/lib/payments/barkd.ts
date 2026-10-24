@@ -14,6 +14,12 @@ import { getConfig } from "../config/core.js";
 
 const BARKD_TIMEOUT_MS = 10000;
 
+// The bolt11 library only knows the bc, tb, bcrt and sb prefixes. Signet invoices (lntbs…, as made by
+// barkd on a signet Ark server) need their network passed in, or decode throws "Unknown coin bech32 prefix".
+const SIGNET = { bech32: "tbs", pubKeyHash: 0x6f, scriptHash: 0xc4, validWitnessVersions: [0, 1] };
+const decodeInvoice = (invoice: string) =>
+    bolt11.decode(invoice, invoice.toLowerCase().startsWith("lntbs") ? SIGNET : undefined);
+
 const barkdRequest = async (method: "GET" | "POST", path: string, body?: object) : Promise<unknown> => {
 
     const url = String(getConfig(null, ["payments", "paymentProviders", "barkd", "url"]) || "").replace(/\/+$/, "");
@@ -48,7 +54,7 @@ const generateBarkdInvoice = async (amount: number, memo: string) : Promise<Invo
         const data = await barkdRequest("POST", "/lightning/receives/invoice", { amount_sat: amount, description: memo }) as { invoice?: string };
         if (!data || !data.invoice) return emptyInvoice;
 
-        const decoded = bolt11.decode(data.invoice);
+        const decoded = decodeInvoice(data.invoice);
         const paymentHash = decoded.tags.find(t => t.tagName == "payment_hash")?.data?.toString() || "";
         if (paymentHash == "") return emptyInvoice;
 

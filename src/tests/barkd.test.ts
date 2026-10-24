@@ -70,9 +70,13 @@ const barkd = {
 	receives: new Map<string, { state: string, payment_preimage: string | null, settled_at: string | null }>(),
 	movements: [] as { status: string, effective_balance_sat: number, received_on: { destination: { type: string, value: string }, amount_sat: number }[] }[],
 	requests: [] as string[],
+	signet: false,
 };
 
+const SIGNET = { bech32: "tbs", pubKeyHash: 0x6f, scriptHash: 0xc4, validWitnessVersions: [0, 1] };
+
 const makeInvoice = (sats: number, paymentHash: string) => bolt11.sign(bolt11.encode({
+	...(barkd.signet ? { network: SIGNET } : {}),
 	satoshis: sats,
 	timestamp: Math.floor(Date.now() / 1000),
 	tags: [{ tagName: "payment_hash", data: paymentHash }, { tagName: "description", data: "" }, { tagName: "expire_time", data: 3600 }],
@@ -156,6 +160,18 @@ describe("barkd provider (bark-rest 0.8.0)", () => {
 		expect(invoice.satoshi).toBe(21);
 		expect(invoice.isPaid).toBe(false);
 		expect(barkd.requests).toContain("POST /api/v1/lightning/receives/invoice");
+	});
+
+	test("Lightning invoice on signet (lntbs prefix)", async () => {
+		barkd.signet = true;
+		try {
+			const invoice = await generateBarkdInvoice(21, "");
+			expect(invoice.paymentRequest.startsWith("lntbs")).toBe(true);
+			expect(invoice.paymentHash).toBe("ab".repeat(32));
+			expect(invoice.satoshi).toBe(21);
+		} finally {
+			barkd.signet = false;
+		}
 	});
 
 	test("Lightning receive is paid only once settled", async () => {
