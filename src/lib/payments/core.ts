@@ -82,7 +82,8 @@ const checkTransaction = async (tenant: string, transactionid : string, originId
 
         const accountid = formatAccountNumber(Number(await dbSelect("SELECT id FROM registered WHERE hex = ?", "id", [pubkey])));
         const invoice = await generateInvoice(accountid, satoshi, originTable, originId, expiryDate < getNewDate() && transaction.transactionid != 0 ? true : false, transaction.transactionid);
-        if (invoice.paymentRequest == "") {return emptyTransaction}
+        // An Ark-only charge has no Lightning invoice, but still a payment hash.
+        if (invoice.paymentHash == "") {return emptyTransaction}
         
         if (getConfig(null, ["payments", "sendMessageToPubkey"]) == true) {
             await sendMessage(`Hi, here’s your invoice from ${getConfig(null, ["server", "host"])} service (${invoice.satoshi} satoshi). We appreciate your payment, thanks!`, pubkey, tenant)
@@ -118,7 +119,7 @@ const generateInvoice = async (accountid: number, satoshi: number, originTable :
     if (satoshi == 0) return emptyInvoice;
 
     const generatedInvoice = await getPaymentProvider().generateInvoice(satoshi);
-    if (generatedInvoice.paymentRequest == "") {return emptyInvoice}
+    if (generatedInvoice.paymentHash == "") {return emptyInvoice}
     
     generatedInvoice.description = "Invoice for: " + originTable + ":" + originId;
 

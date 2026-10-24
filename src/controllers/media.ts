@@ -514,8 +514,8 @@ const uploadMedia = async (req: Request, res: Response, version: string, mode: U
 		if (transaction.isPaid == false){
 			filedata.payment_request = transaction.paymentRequest;
 			res.status(402);
-			res.setHeader("X-Lightning", transaction.paymentRequest);
-			res.setHeader("X-Lightning-amount", transaction.satoshi);
+			if (transaction.paymentRequest) res.setHeader("X-Lightning", transaction.paymentRequest);
+			if (transaction.paymentRequest) res.setHeader("X-Lightning-amount", transaction.satoshi);
 			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
 			if (arkRequest != "") res.setHeader("X-Ark", arkRequest);
 			res.setHeader("X-Reason", `Invoice (${transaction.satoshi}) for hash: ${filedata.originalhash}`);
@@ -657,7 +657,7 @@ const headMedia = async (req: Request, res: Response): Promise<Response> => {
 			"");		
 		
 		if (transaction.transactionid != 0 && transaction.isPaid == false && getConfig(req.hostname, ["payments", "satoshi", "mediaMaxSatoshi"]) > 0) {
-			res.setHeader("X-Lightning", transaction.paymentRequest);
+			if (transaction.paymentRequest) res.setHeader("X-Lightning", transaction.paymentRequest);
 			res.setHeader("X-Lightning-Amount", transaction.satoshi);
 			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
 			if (arkRequest != "") res.setHeader("X-Ark", arkRequest);
@@ -1085,8 +1085,8 @@ const getMediaStatusbyID = async (req: Request, res: Response, version:string): 
 		if(transaction.isPaid == false){
 			filedata.payment_request = transaction.paymentRequest;
 			response = 402;
-			res.setHeader("X-Lightning", transaction.paymentRequest);
-			res.setHeader("X-Lightning-amount", transaction.satoshi);
+			if (transaction.paymentRequest) res.setHeader("X-Lightning", transaction.paymentRequest);
+			if (transaction.paymentRequest) res.setHeader("X-Lightning-amount", transaction.satoshi);
 			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
 			if (arkRequest != "") res.setHeader("X-Ark", arkRequest);
 			res.setHeader("X-Reason", `Invoice (${transaction.satoshi}) for hash: ${filedata.originalhash}`);
@@ -1342,7 +1342,7 @@ const getMediabyURL = async (req: Request, res: Response) => {
 
 			filedata[0].mimetype.startsWith("video") ? res.setHeader('Content-Type', "video/mp4") : res.setHeader('Content-Type', "image/webp");
 
-			res.setHeader('X-Lightning', transaction.paymentRequest);
+			if (transaction.paymentRequest) res.setHeader('X-Lightning', transaction.paymentRequest);
 			res.setHeader('X-Lightning-Amount', transaction.satoshi);
 			const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
 			if (arkRequest != "") res.setHeader('X-Ark', arkRequest);
@@ -1935,7 +1935,7 @@ const headUpload = async (req: Request, res: Response): Promise<Response> => {
 	);
 	
 	if (transaction.transactionid != 0 && transaction.isPaid == false && getConfig(req.hostname, ["payments", "satoshi", "mediaMaxSatoshi"]) > 0) {
-		res.setHeader("X-Lightning", transaction.paymentRequest);
+		if (transaction.paymentRequest) res.setHeader("X-Lightning", transaction.paymentRequest);
 		res.setHeader("X-Lightning-Amount", transaction.satoshi);
 		const arkRequest = await getArkPaymentRequest(req.hostname, transaction);
 		if (arkRequest != "") res.setHeader("X-Ark", arkRequest);

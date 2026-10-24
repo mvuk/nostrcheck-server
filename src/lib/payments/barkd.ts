@@ -6,6 +6,7 @@
 // - Ark: a fresh Ark address per unpaid file, paid off-chain by wallets on the same Ark server
 //   (Blossom X-Ark: https://github.com/hzrd149/blossom/pull/116).
 
+import { randomBytes } from "crypto";
 import bolt11 from 'bolt11';
 import { emptyInvoice, Invoice } from "../../interfaces/payments.js";
 import { logger } from "../logger.js";
@@ -73,9 +74,35 @@ const generateBarkdInvoice = async (amount: number, memo: string) : Promise<Invo
         };
 
     } catch (e) {
+        // An amount below barkd's Lightning receive fee cannot get an invoice, but it can still be
+        // paid over Ark, which has no receive fee. Returning no invoice here would let the file
+        // through unpaid, so the charge is kept and made payable by its Ark address only (X-Ark).
+        if (getConfig(null, ["payments", "paymentProviders", "barkd", "ark"]) == true && /exceeds amount/.test(String(e))) {
+            logger.info(`generateBarkdInvoice - ${amount} sat is below the Lightning receive fee; charging over Ark only`);
+            return arkOnlyInvoice(amount, memo);
+        }
         logger.error(`generateBarkdInvoice - Error generating barkd invoice with error ${e}`);
         return emptyInvoice;
     }
+}
+
+// A charge with no Lightning invoice. It still needs a payment hash, because transactions are keyed by
+// it; a random one never matches a real invoice, so only the Ark address can settle it.
+const arkOnlyInvoice = (amount: number, memo: string) : Invoice => {
+    const now = new Date();
+    return {
+        paymentRequest: "",
+        paymentHash: randomBytes(32).toString("hex"),
+        satoshi: amount,
+        isPaid: false,
+        preimage: "",
+        createdDate: now.toISOString().slice(0, 19).replace('T', ' '),
+        expiryDate: new Date(now.getTime() + 24 * 3600 * 1000).toISOString().slice(0, 19).replace('T', ' '),
+        paidDate: "",
+        description: memo,
+        transactionid: 0,
+        accountid: 0
+    };
 }
 
 const isInvoicePaidBarkd = async (paymentHash: string) : Promise<{paiddate : string, preimage : string}> => {

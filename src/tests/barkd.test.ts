@@ -104,6 +104,8 @@ beforeAll(async () => {
 			const path = url.pathname;
 			if (req.method == "POST" && path == "/api/v1/lightning/receives/invoice") {
 				const { amount_sat } = JSON.parse(body);
+				// barkd refuses an invoice whose amount is below its Lightning receive fee.
+				if (amount_sat < 15) return send(500, { message: `Failed to create invoice: Fee (0.00000015 BTC) exceeds amount (${(amount_sat / 1e8).toFixed(8)} BTC)` });
 				return send(200, { invoice: makeInvoice(amount_sat, "ab".repeat(32)) });
 			}
 			const receive = path.match(/^\/api\/v1\/lightning\/receives\/([0-9a-f]{64})$/);
@@ -160,6 +162,21 @@ describe("barkd provider (bark-rest 0.8.0)", () => {
 		expect(invoice.satoshi).toBe(21);
 		expect(invoice.isPaid).toBe(false);
 		expect(barkd.requests).toContain("POST /api/v1/lightning/receives/invoice");
+	});
+
+	test("An amount below the Lightning receive fee is still charged, over Ark only", async () => {
+		// Before, the failed invoice came back empty and the upload went through unpaid.
+		const invoice = await generateBarkdInvoice(12, "");
+		expect(invoice.paymentRequest).toBe("");
+		expect(invoice.paymentHash).toMatch(/^[0-9a-f]{64}$/);
+		expect(invoice.satoshi).toBe(12);
+
+		const row = addTransaction(12);
+		row.paymentrequest = "";
+		row.paymenthash = invoice.paymentHash;
+		const uri = await getArkPaymentRequest("", await getTransaction("", String(row.id)));
+		expect(uri).toMatch(/^bitcoin:\?ark=tark1testaddress\d+/);
+		expect(uri).not.toContain("lightning=");
 	});
 
 	test("Lightning invoice on signet (lntbs prefix)", async () => {
