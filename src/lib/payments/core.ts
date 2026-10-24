@@ -1,4 +1,4 @@
-import { accounts, emptyInvoice, emptyTransaction, Invoice, tableCalculateMode, Transaction } from "../../interfaces/payments.js";
+import { accounts, emptyInvoice, emptyTransaction, Invoice, PaymentProvider, tableCalculateMode, Transaction } from "../../interfaces/payments.js";
 import { dbDelete, dbInsert, dbMultiSelect, dbSelect, dbUpdate } from "../database/core.js"
 import { logger } from "../logger.js";
 import { sendMessage } from "../nostr/NIP04.js";
@@ -6,6 +6,23 @@ import { getNewDate } from "../utils.js";
 import { generateNwcInvoice, isInvoicePaidNwc } from "../nostr/NIP47.js";
 import { generateLNBitsInvoice, isInvoicePaidLNbits } from "./lnbits.js";
 import { getConfig, getTenants, isModuleEnabled } from "../config/core.js";
+
+const getLNurl = () : string => `https://${getConfig(null, ["payments", "LNAddress"]).split("@")[1]}/.well-known/lnurlp/${getConfig(null, ["payments", "LNAddress"]).split("@")[0]}`;
+
+// Payment providers, selected by payments.paymentProvider.
+const paymentProviders: Record<string, PaymentProvider> = {
+    lnbits: {
+        generateInvoice: (satoshi) => generateLNBitsInvoice(satoshi, ""),
+        isInvoicePaid: isInvoicePaidLNbits,
+    },
+    nwc: {
+        generateInvoice: (satoshi) => generateNwcInvoice(getLNurl(), satoshi),
+        isInvoicePaid: isInvoicePaidNwc,
+    },
+};
+
+// Any other value falls back to NWC, as before.
+const getPaymentProvider = () : PaymentProvider => paymentProviders[getConfig(null, ["payments", "paymentProvider"])] || paymentProviders.nwc;
 
 const checkTransaction = async (tenant: string, transactionid : string, originId: string, originTable : string, size: number, minSize: number, maxSize: number, maxSatoshi: number,  pubkey : string): Promise<Transaction> => {
 
@@ -82,8 +99,7 @@ const generateInvoice = async (accountid: number, satoshi: number, originTable :
 
     if (satoshi == 0) return emptyInvoice;
 
-    const lnurl = `https://${getConfig(null, ["payments", "LNAddress"]).split("@")[1]}/.well-known/lnurlp/${getConfig(null, ["payments", "LNAddress"]).split("@")[0]}`
-    const generatedInvoice = getConfig(null, ["payments", "paymentProvider"]) == 'lnbits' ? await generateLNBitsInvoice(satoshi, "") : await generateNwcInvoice(lnurl, satoshi);
+    const generatedInvoice = await getPaymentProvider().generateInvoice(satoshi);
     if (generatedInvoice.paymentRequest == "") {return emptyInvoice}
     
     generatedInvoice.description = "Invoice for: " + originTable + ":" + originId;
@@ -344,8 +360,7 @@ const _getTransaction = async (transactionid: string) : Promise<Transaction> => 
     // If transaction expirydate is passed we generate a new LN invoice
     if (transaction.type == "invoice" && transaction.expiryDate < getNewDate()) {
 
-        const lnurl = `https://${getConfig(null, ["payments", "LNAddress"]).split("@")[1]}/.well-known/lnurlp/${getConfig(null, ["payments", "LNAddress"]).split("@")[0]}`
-        const inv = getConfig(null, ["payments", "paymentProvider"]) == 'lnbits' ? await generateLNBitsInvoice(transaction.satoshi, "") : await generateNwcInvoice(lnurl, transaction.satoshi);
+        const inv = await getPaymentProvider().generateInvoice(transaction.satoshi);
 
         transaction.paymentRequest = inv.paymentRequest;
         transaction.paymentHash = inv.paymentHash;
@@ -525,7 +540,7 @@ const _isInvoicePaid = async (paymentHash: string) : Promise<{paiddate : string,
         return {paiddate: "", preimage: ""};
     }
 
-    return getConfig(null, ["payments", "paymentProvider"]) == 'lnbits' ? await isInvoicePaidLNbits(paymentHash) : await isInvoicePaidNwc(paymentHash);
+    return await getPaymentProvider().isInvoicePaid(paymentHash);
 
 }
 

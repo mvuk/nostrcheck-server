@@ -95,10 +95,15 @@ interface MacaroonResult  extends ResultMessagev2 {
 }
 
 
+interface PaymentProvider {
+    generateInvoice: (satoshi: number) => Promise<Invoice>;
+    isInvoicePaid: (paymentHash: string) => Promise<{paiddate : string, preimage : string}>;
+}
+
 const tableCalculateMode: { [key: string]: "normal" | "reversed" } = {
     "registered": "reversed",
     "mediafiles": "normal",
    
 };
 
-export { Invoice, emptyInvoice, Transaction, emptyTransaction, accounts, paymentResultMessage, invoiceReturnMessage, amountReturnMessage, Macaroon, MacaroonResult, tableCalculateMode}
+export { Invoice, emptyInvoice, Transaction, emptyTransaction, accounts, paymentResultMessage, invoiceReturnMessage, amountReturnMessage, Macaroon, MacaroonResult, PaymentProvider, tableCalculateMode}
